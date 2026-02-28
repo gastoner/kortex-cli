@@ -110,3 +110,14 @@ All source files must include Apache License 2.0 copyright headers with Red Hat 
 ## Testing
 
 Tests follow Go conventions with `*_test.go` files alongside source files. Tests use the standard `testing` package and should cover command initialization, execution, and error cases.
+
+## GitHub Actions
+
+GitHub Actions workflows are stored in `.github/workflows/`. All workflows must use commit SHA1 hashes instead of version tags for security reasons (to prevent supply chain attacks from tag manipulation).
+
+Example:
+```yaml
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+```
+
+Always include the version as a comment for readability.
