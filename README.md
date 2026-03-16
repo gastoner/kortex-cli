@@ -120,7 +120,35 @@ $ kortex-cli workspace list -o json
 
 Exit code: `0` (success)
 
-**Step 5: Remove a workspace**
+**Step 5: Start a workspace**
+
+```bash
+$ kortex-cli workspace start 2c5f16046476be368fcada501ac6cdc6bbd34ea80eb9ceb635530c0af64681ea -o json
+```
+
+```json
+{
+  "id": "2c5f16046476be368fcada501ac6cdc6bbd34ea80eb9ceb635530c0af64681ea"
+}
+```
+
+Exit code: `0` (success)
+
+**Step 6: Stop a workspace**
+
+```bash
+$ kortex-cli workspace stop 2c5f16046476be368fcada501ac6cdc6bbd34ea80eb9ceb635530c0af64681ea -o json
+```
+
+```json
+{
+  "id": "2c5f16046476be368fcada501ac6cdc6bbd34ea80eb9ceb635530c0af64681ea"
+}
+```
+
+Exit code: `0` (success)
+
+**Step 7: Remove a workspace**
 
 ```bash
 $ kortex-cli workspace remove 2c5f16046476be368fcada501ac6cdc6bbd34ea80eb9ceb635530c0af64681ea -o json
@@ -134,7 +162,7 @@ $ kortex-cli workspace remove 2c5f16046476be368fcada501ac6cdc6bbd34ea80eb9ceb635
 
 Exit code: `0` (success)
 
-**Step 6: Verify removal**
+**Step 8: Verify removal**
 
 ```bash
 $ kortex-cli workspace list -o json
@@ -496,6 +524,188 @@ kortex-cli list -o json
 - When no workspaces are registered, the command displays "No workspaces registered"
 - The JSON output format is useful for scripting and automation
 - All paths are displayed as absolute paths for consistency
+- **JSON error handling**: When `--output json` is used, errors are written to stdout (not stderr) in JSON format, and the CLI exits with code 1. Always check the exit code to determine success/failure
+
+### `workspace start` - Start a Workspace
+
+Starts a registered workspace by its ID. Also available as the shorter alias `start`.
+
+#### Usage
+
+```bash
+kortex-cli workspace start ID [flags]
+kortex-cli start ID [flags]
+```
+
+#### Arguments
+
+- `ID` - The unique identifier of the workspace to start (required)
+
+#### Flags
+
+- `--output, -o <format>` - Output format (supported: `json`)
+- `--storage <path>` - Storage directory for kortex-cli data (default: `$HOME/.kortex-cli`)
+
+#### Examples
+
+**Start a workspace by ID:**
+```bash
+kortex-cli workspace start a1b2c3d4e5f6...
+```
+Output: `a1b2c3d4e5f6...` (ID of started workspace)
+
+**Use the short alias:**
+```bash
+kortex-cli start a1b2c3d4e5f6...
+```
+
+**View workspace IDs before starting:**
+```bash
+# First, list all workspaces to find the ID
+kortex-cli list
+
+# Then start the desired workspace
+kortex-cli start a1b2c3d4e5f6...
+```
+
+**JSON output:**
+```bash
+kortex-cli workspace start a1b2c3d4e5f6... --output json
+```
+Output:
+```json
+{
+  "id": "a1b2c3d4e5f6..."
+}
+```
+
+**JSON output with short flag:**
+```bash
+kortex-cli start a1b2c3d4e5f6... -o json
+```
+
+#### Error Handling
+
+**Workspace not found (text format):**
+```bash
+kortex-cli start invalid-id
+```
+Output:
+```text
+Error: workspace not found: invalid-id
+Use 'workspace list' to see available workspaces
+```
+
+**Workspace not found (JSON format):**
+```bash
+kortex-cli start invalid-id --output json
+```
+Output:
+```json
+{
+  "error": "workspace not found: invalid-id"
+}
+```
+
+#### Notes
+
+- The workspace ID is required and can be obtained using the `workspace list` or `list` command
+- Starting a workspace launches its associated runtime instance
+- Upon successful start, the command outputs the ID of the started workspace
+- The workspace runtime state is updated to reflect that it's running
+- JSON output format is useful for scripting and automation
+- When using `--output json`, errors are also returned in JSON format for consistent parsing
+- **JSON error handling**: When `--output json` is used, errors are written to stdout (not stderr) in JSON format, and the CLI exits with code 1. Always check the exit code to determine success/failure
+
+### `workspace stop` - Stop a Workspace
+
+Stops a running workspace by its ID. Also available as the shorter alias `stop`.
+
+#### Usage
+
+```bash
+kortex-cli workspace stop ID [flags]
+kortex-cli stop ID [flags]
+```
+
+#### Arguments
+
+- `ID` - The unique identifier of the workspace to stop (required)
+
+#### Flags
+
+- `--output, -o <format>` - Output format (supported: `json`)
+- `--storage <path>` - Storage directory for kortex-cli data (default: `$HOME/.kortex-cli`)
+
+#### Examples
+
+**Stop a workspace by ID:**
+```bash
+kortex-cli workspace stop a1b2c3d4e5f6...
+```
+Output: `a1b2c3d4e5f6...` (ID of stopped workspace)
+
+**Use the short alias:**
+```bash
+kortex-cli stop a1b2c3d4e5f6...
+```
+
+**View workspace IDs before stopping:**
+```bash
+# First, list all workspaces to find the ID
+kortex-cli list
+
+# Then stop the desired workspace
+kortex-cli stop a1b2c3d4e5f6...
+```
+
+**JSON output:**
+```bash
+kortex-cli workspace stop a1b2c3d4e5f6... --output json
+```
+Output:
+```json
+{
+  "id": "a1b2c3d4e5f6..."
+}
+```
+
+**JSON output with short flag:**
+```bash
+kortex-cli stop a1b2c3d4e5f6... -o json
+```
+
+#### Error Handling
+
+**Workspace not found (text format):**
+```bash
+kortex-cli stop invalid-id
+```
+Output:
+```text
+Error: workspace not found: invalid-id
+Use 'workspace list' to see available workspaces
+```
+
+**Workspace not found (JSON format):**
+```bash
+kortex-cli stop invalid-id --output json
+```
+Output:
+```json
+{
+  "error": "workspace not found: invalid-id"
+}
+```
+
+#### Notes
+
+- The workspace ID is required and can be obtained using the `workspace list` or `list` command
+- Stopping a workspace stops its associated runtime instance
+- Upon successful stop, the command outputs the ID of the stopped workspace
+- The workspace runtime state is updated to reflect that it's stopped
+- JSON output format is useful for scripting and automation
+- When using `--output json`, errors are also returned in JSON format for consistent parsing
 - **JSON error handling**: When `--output json` is used, errors are written to stdout (not stderr) in JSON format, and the CLI exits with code 1. Always check the exit code to determine success/failure
 
 ### `workspace remove` - Remove a Workspace

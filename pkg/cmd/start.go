@@ -22,19 +22,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewWorkspaceCmd() *cobra.Command {
+func NewStartCmd() *cobra.Command {
+	// Create the workspace start command
+	workspaceStartCmd := NewWorkspaceStartCmd()
+
+	// Create an alias command that delegates to workspace start
 	cmd := &cobra.Command{
-		Use:   "workspace",
-		Short: "Manage workspaces",
-		Long:  "Manage workspaces registered with kortex-cli init",
-		Args:  cobra.NoArgs,
+		Use:     "start ID",
+		Short:   workspaceStartCmd.Short,
+		Long:    workspaceStartCmd.Long,
+		Example: AdaptExampleForAlias(workspaceStartCmd.Example, "workspace start", "start"),
+		Args:    workspaceStartCmd.Args,
+		PreRunE: workspaceStartCmd.PreRunE,
+		RunE:    workspaceStartCmd.RunE,
 	}
 
-	// Add subcommands
-	cmd.AddCommand(NewWorkspaceListCmd())
-	cmd.AddCommand(NewWorkspaceRemoveCmd())
-	cmd.AddCommand(NewWorkspaceStartCmd())
-	cmd.AddCommand(NewWorkspaceStopCmd())
+	// Copy flags from workspace start command
+	cmd.Flags().AddFlagSet(workspaceStartCmd.Flags())
 
 	return cmd
 }

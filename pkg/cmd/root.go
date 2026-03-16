@@ -50,6 +50,8 @@ func NewRootCmd() *cobra.Command {
 	rootCmd.AddCommand(NewWorkspaceCmd())
 	rootCmd.AddCommand(NewListCmd())
 	rootCmd.AddCommand(NewRemoveCmd())
+	rootCmd.AddCommand(NewStartCmd())
+	rootCmd.AddCommand(NewStopCmd())
 
 	// Global flags
 	rootCmd.PersistentFlags().String("storage", defaultStoragePath, "Directory where kortex-cli will store all its files")
