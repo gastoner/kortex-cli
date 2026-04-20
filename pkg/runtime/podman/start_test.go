@@ -52,6 +52,9 @@ func TestStart_Success(t *testing.T) {
 	fakeExec := exec.NewFake()
 
 	fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "exec" {
+			return []byte("accepting connections\n"), nil
+		}
 		output := fmt.Sprintf("%s|running|kdn-test\n", containerID)
 		return []byte(output), nil
 	}
@@ -64,7 +67,13 @@ func TestStart_Success(t *testing.T) {
 		t.Fatalf("Start() failed: %v", err)
 	}
 
-	// Verify pod start was called
+	// Verify postgres was started individually first
+	fakeExec.AssertRunCalledWith(t, "start", podName+"-postgres")
+
+	// Verify pg_isready was called to wait for postgres
+	fakeExec.AssertOutputCalledWith(t, "exec", podName+"-postgres", "pg_isready", "-U", "onecli")
+
+	// Verify pod start was called for remaining containers
 	fakeExec.AssertRunCalledWith(t, "pod", "start", podName)
 
 	// Verify inspect was called
@@ -84,6 +93,30 @@ func TestStart_Success(t *testing.T) {
 	}
 }
 
+func TestStart_PostgresStartFailure(t *testing.T) {
+	t.Parallel()
+
+	containerID := "abc123"
+	fakeExec := exec.NewFake()
+
+	fakeExec.RunFunc = func(ctx context.Context, args ...string) error {
+		if len(args) > 0 && args[0] == "start" {
+			return fmt.Errorf("container not found")
+		}
+		return nil
+	}
+
+	p := newWithDeps(&fakeSystem{}, fakeExec).(*podmanRuntime)
+	podName := setupPodFiles(t, p, containerID, "test-ws")
+
+	_, err := p.Start(context.Background(), containerID)
+	if err == nil {
+		t.Fatal("Expected error when postgres start fails, got nil")
+	}
+
+	fakeExec.AssertRunCalledWith(t, "start", podName+"-postgres")
+}
+
 func TestStart_PodStartFailure(t *testing.T) {
 	t.Parallel()
 
@@ -91,7 +124,14 @@ func TestStart_PodStartFailure(t *testing.T) {
 	fakeExec := exec.NewFake()
 
 	fakeExec.RunFunc = func(ctx context.Context, args ...string) error {
-		return fmt.Errorf("pod not found")
+		if len(args) >= 2 && args[0] == "pod" && args[1] == "start" {
+			return fmt.Errorf("pod not found")
+		}
+		return nil
+	}
+
+	fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+		return []byte("accepting connections\n"), nil
 	}
 
 	p := newWithDeps(&fakeSystem{}, fakeExec).(*podmanRuntime)
@@ -102,6 +142,7 @@ func TestStart_PodStartFailure(t *testing.T) {
 		t.Fatal("Expected error when pod start fails, got nil")
 	}
 
+	fakeExec.AssertRunCalledWith(t, "start", podName+"-postgres")
 	fakeExec.AssertRunCalledWith(t, "pod", "start", podName)
 }
 
@@ -112,6 +153,9 @@ func TestStart_InspectFailure(t *testing.T) {
 	fakeExec := exec.NewFake()
 
 	fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "exec" {
+			return []byte("accepting connections\n"), nil
+		}
 		return nil, fmt.Errorf("inspect failed")
 	}
 
@@ -123,8 +167,33 @@ func TestStart_InspectFailure(t *testing.T) {
 		t.Fatal("Expected error when inspect fails, got nil")
 	}
 
+	fakeExec.AssertRunCalledWith(t, "start", podName+"-postgres")
 	fakeExec.AssertRunCalledWith(t, "pod", "start", podName)
 	fakeExec.AssertOutputCalledWith(t, "inspect", "--format", "{{.Id}}|{{.State.Status}}|{{.ImageName}}", containerID)
+}
+
+func TestStart_PostgresReadinessFailure(t *testing.T) {
+	t.Parallel()
+
+	containerID := "abc123"
+	fakeExec := exec.NewFake()
+
+	fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+
+	p := newWithDeps(&fakeSystem{}, fakeExec).(*podmanRuntime)
+	podName := setupPodFiles(t, p, containerID, "test-ws")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := p.Start(ctx, containerID)
+	if err == nil {
+		t.Fatal("Expected error when postgres readiness check fails, got nil")
+	}
+
+	fakeExec.AssertRunCalledWith(t, "start", podName+"-postgres")
 }
 
 func TestStart_StepLogger_Success(t *testing.T) {
@@ -134,6 +203,9 @@ func TestStart_StepLogger_Success(t *testing.T) {
 	fakeExec := exec.NewFake()
 
 	fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "exec" {
+			return []byte("accepting connections\n"), nil
+		}
 		output := fmt.Sprintf("%s|running|kdn-test\n", containerID)
 		return []byte(output), nil
 	}
@@ -159,6 +231,14 @@ func TestStart_StepLogger_Success(t *testing.T) {
 
 	expectedSteps := []stepCall{
 		{
+			inProgress: "Starting postgres",
+			completed:  "Postgres started",
+		},
+		{
+			inProgress: "Waiting for postgres to be ready",
+			completed:  "Postgres is ready",
+		},
+		{
 			inProgress: fmt.Sprintf("Starting pod: %s", podName),
 			completed:  "Pod started",
 		},
@@ -183,18 +263,18 @@ func TestStart_StepLogger_Success(t *testing.T) {
 	}
 }
 
-func TestStart_StepLogger_FailOnPodStart(t *testing.T) {
+func TestStart_StepLogger_FailOnPostgresStart(t *testing.T) {
 	t.Parallel()
 
 	containerID := "abc123"
 	fakeExec := exec.NewFake()
 
 	fakeExec.RunFunc = func(ctx context.Context, args ...string) error {
-		return fmt.Errorf("pod not found")
+		return fmt.Errorf("container not found")
 	}
 
 	p := newWithDeps(&fakeSystem{}, fakeExec).(*podmanRuntime)
-	podName := setupPodFiles(t, p, containerID, "test-ws")
+	setupPodFiles(t, p, containerID, "test-ws")
 
 	fakeLogger := &fakeStepLogger{}
 	ctx := steplogger.WithLogger(context.Background(), fakeLogger)
@@ -212,8 +292,8 @@ func TestStart_StepLogger_FailOnPodStart(t *testing.T) {
 		t.Fatalf("Expected 1 Start() call, got %d", len(fakeLogger.startCalls))
 	}
 
-	if fakeLogger.startCalls[0].inProgress != fmt.Sprintf("Starting pod: %s", podName) {
-		t.Errorf("Expected first step to be 'Starting pod: %s', got %q", podName, fakeLogger.startCalls[0].inProgress)
+	if fakeLogger.startCalls[0].inProgress != "Starting postgres" {
+		t.Errorf("Expected first step to be 'Starting postgres', got %q", fakeLogger.startCalls[0].inProgress)
 	}
 
 	if len(fakeLogger.failCalls) != 1 {
@@ -228,6 +308,9 @@ func TestStart_StepLogger_FailOnGetContainerInfo(t *testing.T) {
 	fakeExec := exec.NewFake()
 
 	fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "exec" {
+			return []byte("accepting connections\n"), nil
+		}
 		return nil, fmt.Errorf("failed to inspect container")
 	}
 
@@ -246,11 +329,13 @@ func TestStart_StepLogger_FailOnGetContainerInfo(t *testing.T) {
 		t.Errorf("Expected Complete() to be called 1 time, got %d", fakeLogger.completeCalls)
 	}
 
-	if len(fakeLogger.startCalls) != 2 {
-		t.Fatalf("Expected 2 Start() calls, got %d", len(fakeLogger.startCalls))
+	if len(fakeLogger.startCalls) != 4 {
+		t.Fatalf("Expected 4 Start() calls, got %d", len(fakeLogger.startCalls))
 	}
 
 	expectedSteps := []string{
+		"Starting postgres",
+		"Waiting for postgres to be ready",
 		fmt.Sprintf("Starting pod: %s", podName),
 		"Verifying container status",
 	}
