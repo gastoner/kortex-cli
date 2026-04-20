@@ -17,13 +17,22 @@ package podman
 import (
 	"context"
 	"fmt"
+	"io"
+	"time"
 
 	"github.com/openkaiden/kdn/pkg/logger"
 	"github.com/openkaiden/kdn/pkg/runtime"
 	"github.com/openkaiden/kdn/pkg/steplogger"
 )
 
+const (
+	postgresMaxRetries    = 30
+	postgresRetryInterval = 2 * time.Second
+)
+
 // Start starts all containers in the workspace pod.
+// Postgres is started first and verified ready before starting the remaining
+// containers so that onecli can connect to the database immediately.
 func (p *podmanRuntime) Start(ctx context.Context, id string) (runtime.RuntimeInfo, error) {
 	stepLogger := steplogger.FromContext(ctx)
 	defer stepLogger.Complete()
@@ -38,9 +47,27 @@ func (p *podmanRuntime) Start(ctx context.Context, id string) (runtime.RuntimeIn
 		return runtime.RuntimeInfo{}, fmt.Errorf("failed to resolve pod name: %w", err)
 	}
 
-	// Start the entire pod (all containers at once)
-	stepLogger.Start(fmt.Sprintf("Starting pod: %s", podName), "Pod started")
 	l := logger.FromContext(ctx)
+
+	// Start the postgres container first so it is accepting connections
+	// before onecli attempts its database migration.
+	postgresContainer := podName + "-postgres"
+	stepLogger.Start("Starting postgres", "Postgres started")
+	if err := p.executor.Run(ctx, l.Stdout(), l.Stderr(), "start", postgresContainer); err != nil {
+		stepLogger.Fail(err)
+		return runtime.RuntimeInfo{}, fmt.Errorf("failed to start postgres container: %w", err)
+	}
+
+	// Wait until postgres is accepting connections
+	stepLogger.Start("Waiting for postgres to be ready", "Postgres is ready")
+	if err := p.waitForPostgres(ctx, podName); err != nil {
+		stepLogger.Fail(err)
+		return runtime.RuntimeInfo{}, fmt.Errorf("postgres did not become ready: %w", err)
+	}
+
+	// Start the rest of the pod (onecli + workspace); already-running
+	// containers (postgres) are left untouched by pod start.
+	stepLogger.Start(fmt.Sprintf("Starting pod: %s", podName), "Pod started")
 	if err := p.executor.Run(ctx, l.Stdout(), l.Stderr(), "pod", "start", podName); err != nil {
 		stepLogger.Fail(err)
 		return runtime.RuntimeInfo{}, fmt.Errorf("failed to start pod: %w", err)
@@ -55,4 +82,26 @@ func (p *podmanRuntime) Start(ctx context.Context, id string) (runtime.RuntimeIn
 	}
 
 	return info, nil
+}
+
+// waitForPostgres polls the postgres container inside the pod until pg_isready succeeds.
+// The postgres container name follows the podman kube play convention: <podName>-postgres.
+func (p *podmanRuntime) waitForPostgres(ctx context.Context, podName string) error {
+	containerName := podName + "-postgres"
+	var lastErr error
+	for range postgresMaxRetries {
+		_, err := p.executor.Output(ctx, io.Discard,
+			"exec", containerName, "pg_isready", "-U", "onecli")
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(postgresRetryInterval):
+		}
+	}
+	return fmt.Errorf("postgres not ready after %d retries: %w", postgresMaxRetries, lastErr)
 }
