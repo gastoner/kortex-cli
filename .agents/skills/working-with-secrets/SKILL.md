@@ -13,7 +13,7 @@ The secrets system uses a two-layer architecture: a **Store** that persists secr
 - Secret **values** live exclusively in the system keychain — never on disk
 - Non-sensitive **metadata** (type, hosts, path, header descriptors, envs) is persisted to `<storage-dir>/secrets.json`
 - Named types (e.g. `github`) derive all their descriptor fields from a registered `SecretService`
-- The built-in `other` type requires the user to supply all descriptor fields explicitly
+- The built-in `other` type lets the user supply descriptor fields explicitly; only `--host` and `--header` are required
 
 ## Key Components
 
@@ -39,7 +39,7 @@ The keychain backend is platform-specific: GNOME Keyring on Linux, Keychain on m
 | Type | How descriptor fields are resolved |
 |------|------------------------------------|
 | Named (e.g. `github`) | Taken from the registered `SecretService` automatically |
-| `other` | User must supply `--host`, `--path`, `--header`, `--headerTemplate`, `--env` |
+| `other` | Required: `--host`, `--header`; optional: `--path`, `--headerTemplate`, `--env` |
 
 ## Using the Store
 
@@ -56,18 +56,16 @@ err := store.Create(secret.CreateParams{
 })
 ```
 
-For `other` type, also supply the descriptor fields:
+For `other` type, supply the required descriptor fields; `Path`, `HeaderTemplate`, and `Envs` are optional:
 
 ```go
 err := store.Create(secret.CreateParams{
-    Name:           "my-api-key",
-    Type:           secret.TypeOther,
-    Value:          "secret123",
-    Hosts:          []string{"api.example.com"},
-    Path:           "/v1",
-    Header:         "Authorization",
-    HeaderTemplate: "Bearer ${value}",
-    Envs:           []string{"MY_API_KEY"},
+    Name:   "my-api-key",
+    Type:   secret.TypeOther,
+    Value:  "secret123",
+    Hosts:  []string{"api.example.com"},
+    Header: "Authorization",
+    Envs:   []string{"MY_API_KEY"}, // optional
 })
 ```
 
