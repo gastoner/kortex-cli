@@ -25,17 +25,18 @@ import (
 	"github.com/openkaiden/kdn/pkg/runtime"
 	"github.com/openkaiden/kdn/pkg/runtime/podman/config"
 	"github.com/openkaiden/kdn/pkg/runtime/podman/exec"
+	system2 "github.com/openkaiden/kdn/pkg/runtime/podman/system"
 	"github.com/openkaiden/kdn/pkg/system"
 )
 
 // podmanRuntime implements the runtime.Runtime interface for Podman.
 type podmanRuntime struct {
-	system          system.System
-	executor        exec.Executor
-	storageDir      string                // Runtime-specific storage: <globalStorageDir>/runtimes/podman
-	globalStorageDir string               // Top-level kdn storage dir: where config/projects.json lives
-	config          config.Config         // Configuration manager for runtime settings
-	onecliBaseURLFn func(port int) string // overridable in tests; nil uses default http://localhost:<port>
+	system           system.System
+	executor         exec.Executor
+	storageDir       string                // Runtime-specific storage: <globalStorageDir>/runtimes/podman
+	globalStorageDir string                // Top-level kdn storage dir: where config/projects.json lives
+	config           config.Config         // Configuration manager for runtime settings
+	onecliBaseURLFn  func(port int) string // overridable in tests; nil uses default http://localhost:<port>
 }
 
 // onecliURL returns the base URL for the OneCLI service on the given port.
@@ -192,6 +193,7 @@ func (p *podmanRuntime) readPodTemplateData(containerID string) (podTemplateData
 	if err := json.Unmarshal(data, &tmplData); err != nil {
 		return podTemplateData{}, fmt.Errorf("failed to unmarshal pod template data: %w", err)
 	}
+	tmplData.ApprovalHandlerDir = system2.MachinePathToHostPath(tmplData.ApprovalHandlerDir)
 	return tmplData, nil
 }
 
