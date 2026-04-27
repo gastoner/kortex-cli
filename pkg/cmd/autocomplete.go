@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 
 	api "github.com/openkaiden/kdn-api/cli/go"
+	"github.com/openkaiden/kdn/pkg/envvars"
 	"github.com/openkaiden/kdn/pkg/instances"
 	"github.com/openkaiden/kdn/pkg/runtimesetup"
 	"github.com/openkaiden/kdn/pkg/secret"
@@ -64,14 +65,17 @@ func getFilteredWorkspaceIDs(cmd *cobra.Command, filter stateFilter) ([]string, 
 		return nil, cobra.ShellCompDirectiveError
 	}
 
+	ignoreIDs := envvars.IsTruthy("KDN_AUTOCOMPLETE_IGNORE_IDS")
+
 	// Extract IDs and names with optional filtering
 	var completions []string
 	for _, instance := range instancesList {
 		state := instance.GetRuntimeData().State
 		// Apply filter if provided, otherwise include all
 		if filter == nil || filter(state) {
-			// Add both ID and name for better discoverability
-			completions = append(completions, instance.GetID())
+			if !ignoreIDs {
+				completions = append(completions, instance.GetID())
+			}
 			completions = append(completions, instance.GetName())
 		}
 	}
@@ -149,12 +153,16 @@ func completeDashboardWorkspaceIDWith(cmd *cobra.Command, listDashboardTypes fun
 		return nil, cobra.ShellCompDirectiveError
 	}
 
+	ignoreIDs := envvars.IsTruthy("KDN_AUTOCOMPLETE_IGNORE_IDS")
+
 	var completions []string
 	for _, instance := range instancesList {
 		runtimeData := instance.GetRuntimeData()
 		if runtimeData.State == api.WorkspaceStateRunning {
 			if _, ok := dashboardTypeSet[runtimeData.Type]; ok {
-				completions = append(completions, instance.GetID())
+				if !ignoreIDs {
+					completions = append(completions, instance.GetID())
+				}
 				completions = append(completions, instance.GetName())
 			}
 		}
