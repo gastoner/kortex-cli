@@ -189,9 +189,12 @@ func TestWritePodFiles(t *testing.T) {
 		containerID := "abc123"
 
 		data := podTemplateData{
-			Name:          "my-project",
-			OnecliWebPort: 30001,
-			OnecliVersion: "1.17",
+			Name:              "my-project",
+			OnecliWebPort:     30001,
+			OnecliVersion:     "1.17",
+			AgentUID:          1000,
+			BaseImageRegistry: "registry.fedoraproject.org/fedora",
+			BaseImageVersion:  "latest",
 		}
 
 		err := p.writePodFiles(containerID, data)
@@ -229,9 +232,12 @@ func TestWritePodFiles(t *testing.T) {
 		containerID := "def456"
 
 		data := podTemplateData{
-			Name:          "test-ws",
-			OnecliWebPort: 40001,
-			OnecliVersion: "1.17",
+			Name:              "test-ws",
+			OnecliWebPort:     40001,
+			OnecliVersion:     "1.17",
+			AgentUID:          1000,
+			BaseImageRegistry: "registry.fedoraproject.org/fedora",
+			BaseImageVersion:  "latest",
 		}
 
 		err := p.writePodFiles(containerID, data)
@@ -268,9 +274,12 @@ func TestCleanupPodFiles(t *testing.T) {
 	containerID := "abc123"
 
 	data := podTemplateData{
-		Name:          "my-ws",
-		OnecliWebPort: 50001,
-		OnecliVersion: "1.17",
+		Name:              "my-ws",
+		OnecliWebPort:     50001,
+		OnecliVersion:     "1.17",
+		AgentUID:          1000,
+		BaseImageRegistry: "registry.fedoraproject.org/fedora",
+		BaseImageVersion:  "latest",
 	}
 
 	if err := p.writePodFiles(containerID, data); err != nil {
@@ -295,9 +304,13 @@ func TestRenderPodYAML(t *testing.T) {
 		t.Parallel()
 
 		data := podTemplateData{
-			Name:          "my-project",
-			OnecliWebPort: 32101,
-			OnecliVersion: "1.17",
+			Name:               "my-project",
+			OnecliWebPort:      32101,
+			OnecliVersion:      "1.17",
+			AgentUID:           1000,
+			BaseImageRegistry:  "registry.fedoraproject.org/fedora",
+			BaseImageVersion:   "latest",
+			ApprovalHandlerDir: "/tmp/approval-handler/my-project",
 		}
 
 		result, err := renderPodYAML(data)
@@ -316,11 +329,23 @@ func TestRenderPodYAML(t *testing.T) {
 		if !strings.Contains(yamlStr, "ghcr.io/onecli/onecli:1.17") {
 			t.Error("Expected rendered YAML to contain versioned onecli image")
 		}
-		if strings.Contains(yamlStr, "volumeMounts") {
-			t.Error("Expected rendered YAML to NOT contain volumeMounts")
+		if !strings.Contains(yamlStr, "approval-handler") {
+			t.Error("Expected rendered YAML to contain approval-handler container")
 		}
-		if strings.Contains(yamlStr, "volumes:") {
-			t.Error("Expected rendered YAML to NOT contain volumes section")
+		if !strings.Contains(yamlStr, "/tmp/approval-handler/my-project") {
+			t.Error("Expected rendered YAML to contain approval handler hostPath")
+		}
+		if !strings.Contains(yamlStr, "volumeMounts") {
+			t.Error("Expected rendered YAML to contain volumeMounts for approval-handler")
+		}
+		if !strings.Contains(yamlStr, "network-guard") {
+			t.Error("Expected rendered YAML to contain network-guard container")
+		}
+		if !strings.Contains(yamlStr, "NET_ADMIN") {
+			t.Error("Expected rendered YAML to contain NET_ADMIN capability for network-guard")
+		}
+		if !strings.Contains(yamlStr, "registry.fedoraproject.org/fedora:latest") {
+			t.Error("Expected rendered YAML to contain base image for network-guard")
 		}
 
 		// Postgres (5432) and proxy (10255) ports should NOT have hostPort mappings
@@ -336,9 +361,13 @@ func TestRenderPodYAML(t *testing.T) {
 		t.Parallel()
 
 		data := podTemplateData{
-			Name:          "test",
-			OnecliWebPort: 10001,
-			OnecliVersion: "2.0",
+			Name:               "test",
+			OnecliWebPort:      10001,
+			OnecliVersion:      "2.0",
+			AgentUID:           1000,
+			BaseImageRegistry:  "registry.fedoraproject.org/fedora",
+			BaseImageVersion:   "42",
+			ApprovalHandlerDir: "/tmp/approval-handler/test",
 		}
 
 		result, err := renderPodYAML(data)

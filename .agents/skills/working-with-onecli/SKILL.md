@@ -1,6 +1,6 @@
 ---
 name: working-with-onecli
-description: Guide to the OneCLI package including the Client, CredentialProvider, SecretMapper, and SecretProvisioner interfaces, and how they integrate with the Podman runtime
+description: Guide to the OneCLI package including the Client, CredentialProvider, SecretMapper, and SecretProvisioner interfaces, how they integrate with the Podman runtime, and the deny-mode networking / approval-handler sidecar design
 argument-hint: ""
 ---
 
@@ -69,11 +69,14 @@ cfg, err := client.GetContainerConfig(ctx)
 
 ### Networking Rules API
 
+Valid `Action` values are `"block"`, `"rate_limit"`, and `"manual_approval"`. `"allow"` is **not** a valid action — OneCLI rejects it.
+
 ```go
+// Create a catch-all manual_approval rule (used for deny-mode networking).
 rule, err := client.CreateRule(ctx, onecli.CreateRuleInput{
-    Name:        "allow-github",
-    HostPattern: "github\\.com",
-    Action:      "allow",
+    Name:        "manual-approval-all",
+    HostPattern: "*",
+    Action:      "manual_approval",
     Enabled:     true,
 })
 
@@ -142,11 +145,16 @@ The Podman runtime is the primary consumer of this package. The flow during work
 
 ### Workspace start (`pkg/runtime/podman/network.go` — `configureNetworking`)
 
+Only runs when the workspace config has `network.mode = deny` **and** at least one host in `network.hosts`. All other cases (allow mode, no config, deny with empty hosts) call `clearNetworkingRules` instead to remove leftover rules.
+
 1. `NewCredentialProvider(baseURL).APIKey(ctx)`
 2. `NewClient(baseURL, apiKey)`
 3. `client.ListRules(ctx)` + `client.DeleteRule(ctx, id)` — wipe stale rules (idempotency)
-4. `client.CreateRule(ctx, ...)` for each allowed host → `action: "allow"`
-5. `client.CreateRule(ctx, ...)` with `hostPattern: "*"` → `action: "block"` (catch-all)
+4. `client.CreateRule(ctx, CreateRuleInput{HostPattern: "*", Action: "manual_approval"})` — single catch-all rule; individual per-host allow rules are **not** used because `"allow"` is not a valid OneCLI action
+5. Write `config.json` to the approval-handler directory (see Deny-mode Networking below)
+6. The approval-handler sidecar container is then started by `Start()` — it reads `config.json` and connects to the OneCLI gateway to approve/deny each intercepted request
+
+The network policy is read fresh from `workspace.json` + `projects.json` on every `Start()`, so it takes effect without recreating the workspace.
 
 ### Secret flow from manager (`pkg/instances/manager.go`)
 
@@ -164,6 +172,137 @@ for _, name := range *mergedConfig.Secrets {
 }
 // runtime.CreateParams.OnecliSecrets = onecliSecrets
 ```
+
+## Deny-mode Networking
+
+When a workspace is configured with `network.mode = deny`, two layers of enforcement prevent the agent from reaching the internet directly:
+
+1. **nftables firewall (kernel level)**: A `network-guard` sidecar container with `CAP_NET_ADMIN` sets nftables OUTPUT rules that DROP all outbound traffic from the agent's UID. Only loopback (intra-pod) and `host.containers.internal` (host-local services) are allowed. This prevents bypassing the proxy by unsetting `HTTP_PROXY`.
+2. **OneCLI proxy (application level)**: A `manual_approval` rule covering all hosts (`*`) is created. The approval-handler sidecar approves or denies each intercepted request based on the configured `hosts` list.
+
+### Architecture
+
+```text
+agent container (UID blocked by nftables except loopback + host gateway)
+  │  (HTTP_PROXY → OneCLI on localhost)
+  ▼
+OneCLI gateway (port 10255) ──► approval-handler sidecar
+  │                               (polls gateway, approves/denies per hosts list)
+  ▼
+Internet (only OneCLI can reach it)
+```
+
+### nftables firewall enforcement
+
+The `network-guard` container (`pkg/runtime/podman/pods/onecli-pod.yaml`) runs the same Fedora base image as the workspace. It has `CAP_NET_ADMIN` and installs `nftables` on first start, then sleeps. During `Start()`, the Podman runtime execs `nft` commands into this container.
+
+**Key files:**
+
+- `pkg/runtime/podman/network.go` — `setupFirewallRules()` / `clearFirewallRules()` / `buildNftScript()`
+- `pkg/runtime/podman/pods/onecli-pod.yaml` — network-guard container definition
+
+**nftables rules (deny mode):**
+
+```bash
+# IPv4 — default accept, block agent UID (except loopback + host gateway)
+nft add chain ip filter output '{ type filter hook output priority 0; policy accept; }'
+nft add rule ip filter output oif lo accept
+nft add rule ip filter output ip daddr <host-gw-ip> accept   # if resolvable
+nft add rule ip filter output meta skuid <agent-uid> drop
+
+# IPv6 — mirror (without host gateway since it's IPv4 only)
+nft add chain ip6 filter output '{ type filter hook output priority 0; policy accept; }'
+nft add rule ip6 filter output oif lo accept
+nft add rule ip6 filter output meta skuid <agent-uid> drop
+```
+
+Rules are **idempotent**: existing tables are deleted before being recreated on each `Start()`.
+
+**Always-allowed destinations:**
+
+- **localhost / loopback** (`oif lo accept`): Intra-pod communication — OneCLI proxy, postgres, local web servers. Required for the proxy to work.
+- **`host.containers.internal`** (resolved IP): The host machine gateway. Allows agents to reach host-local services like Ollama, RamaLama, or any LLM provider running on the host.
+
+**Why the agent cannot remove the rules:**
+
+- The workspace container does NOT have `CAP_NET_ADMIN` — only network-guard does
+- `nft` commands from the workspace container fail with EPERM
+- Even `sudo nft flush ruleset` fails because the capability is absent from the container
+
+**In allow mode**, `clearFirewallRules()` deletes the filter tables to restore default connectivity.
+
+### Application-level enforcement (OneCLI + approval-handler)
+
+### Approval-handler sidecar
+
+The sidecar is a TypeScript script (`pkg/runtime/podman/pods/approval-handler.ts`) that runs inside the pod as a UBI Node.js 22 container. It uses the `@onecli-sh/sdk` package.
+
+**Startup sequence (in `Start()`):**
+
+1. `configureNetworking` writes `config.json` to the approval-handler directory on the host (mounted at `/app` inside the container)
+2. `podman start <pod>-approval-handler` — container copies `/app/*` to its working directory and runs the script
+
+**`config.json` format** (written by `configureNetworking`, never edited manually):
+
+```json
+{
+  "onecliUrl":  "http://localhost:10254",
+  "gatewayUrl": "http://localhost:10255",
+  "apiKey":     "oc_...",
+  "hosts":      ["api.github.com", "*.example.com"]
+}
+```
+
+- `onecliUrl` / `gatewayUrl` use the internal container ports, not the host-mapped ports
+- `apiKey` is fetched via `CredentialProvider.APIKey()` (calls `GET /api/user/api-key`)
+- `hosts` comes from `network.hosts` in the workspace config
+
+**If `config.json` is absent** the script exits immediately with `"no config.json found, exiting (allow mode)"` — this is expected when the workspace is in allow mode.
+
+### Host matching
+
+The approval-handler checks each request's hostname against the `hosts` list using glob patterns:
+
+| Pattern | Approves |
+|---------|---------|
+| `*` | everything |
+| `api.github.com` | exact match only |
+| `*.github.com` | `api.github.com`, `cdn.github.com` but **not** `github.com` |
+
+Only three forms are supported: catch-all `*`, leading-wildcard `*.domain`, or exact hostname. Mid-pattern wildcards like `api.*.com` are treated as literal strings and will never match.
+
+Implementation (`approval-handler.ts`):
+
+```typescript
+function matchesPattern(pattern: string, hostname: string): boolean {
+  if (pattern === "*") return true;
+  if (pattern.startsWith("*.")) {
+    const suffix = pattern.slice(1); // ".github.com"
+    return hostname.endsWith(suffix) && hostname.length > suffix.length;
+  }
+  return pattern === hostname;
+}
+```
+
+### Signal handling
+
+The sidecar registers both `SIGTERM` (Linux/macOS) and `SIGINT` (Ctrl+C, required on Windows) to gracefully stop the SDK polling loop.
+
+### Windows path translation (`pkg/runtime/podman/system`)
+
+On Windows, Podman runs inside a WSL2 VM. Host paths (`C:\Users\...`) must be translated to their VM-side POSIX equivalents (`/mnt/c/Users/...`) before being written into the pod YAML `hostPath` field, and translated back when reading the stored path to write `config.json`.
+
+```go
+import podmanSystem "github.com/openkaiden/kdn/pkg/runtime/podman/system"
+
+// In Create(): store the machine-side path in pod-template-data.json
+ApprovalHandlerDir: podmanSystem.HostPathToMachinePath(approvalHandlerDir),
+
+// In readPodTemplateData(): convert back to host path before writing config.json
+tmplData.ApprovalHandlerDir = podmanSystem.MachinePathToHostPath(tmplData.ApprovalHandlerDir)
+```
+
+Both functions are no-ops on Linux and macOS (`//go:build !windows`). The Windows build (`//go:build windows`) performs the `C:\` ↔ `/mnt/c/` conversion.
 
 ## Testing
 

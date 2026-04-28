@@ -178,6 +178,21 @@ The runtime system provides a pluggable architecture for managing workspaces on 
 
 **To add a new runtime, use:** `/add-runtime`
 
+### Podman Runtime — Deny-mode Networking
+
+When a workspace has `network.mode = deny` with at least one host in `network.hosts`, the Podman runtime enforces outbound traffic filtering on every `Start()` using two layers:
+
+1. **nftables firewall (kernel level)**: A `network-guard` sidecar with `CAP_NET_ADMIN` runs nftables rules that DROP outbound traffic from the agent's UID. Loopback and `host.containers.internal` are always allowed. This prevents bypassing the proxy by unsetting `HTTP_PROXY`.
+2. **OneCLI proxy (application level)**: All existing OneCLI rules are deleted, a single `manual_approval` rule for `*` is created (**`"allow"` is not a valid OneCLI action**), and the `approval-handler` sidecar approves/denies intercepted requests by hostname pattern.
+
+**Key files:**
+- `pkg/runtime/podman/network.go` — `configureNetworking` / `clearNetworkingRules` / `setupFirewallRules` / `clearFirewallRules` / `buildNftScript`
+- `pkg/runtime/podman/pods/approval-handler.ts` — Node.js sidecar (TypeScript, runs via `tsx`)
+- `pkg/runtime/podman/pods/onecli-pod.yaml` — pod manifest with the approval-handler, network-guard, and OneCLI containers
+- `pkg/runtime/podman/system/path.go` / `path_windows.go` — `HostPathToMachinePath` / `MachinePathToHostPath` for translating host paths to Podman Machine (WSL2) paths on Windows; no-ops on Linux/macOS
+
+**For the full design, use:** `/working-with-onecli`
+
 ### Secret Service System
 
 The secret service system provides a pluggable architecture for managing secret service definitions that describe how secrets are applied to workspace requests.

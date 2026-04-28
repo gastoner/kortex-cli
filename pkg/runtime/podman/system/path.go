@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package pods
+//go:build !windows
 
-import _ "embed"
+package system
 
-//go:embed onecli-pod.yaml
-var OnecliPodYAML []byte
+// HostPathToMachinePath returns the path unchanged on non-Windows platforms.
+func HostPathToMachinePath(p string) string {
+	return p
+}
 
-//go:embed approval-handler.ts
-var ApprovalHandlerTS []byte
-
-//go:embed approval-handler-package.json
-var ApprovalHandlerPackageJSON []byte
+// MachinePathToHostPath returns the path unchanged on non-Windows platforms.
+func MachinePathToHostPath(p string) string {
+	return p
+}

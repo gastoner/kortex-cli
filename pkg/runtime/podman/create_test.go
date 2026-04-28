@@ -16,9 +16,12 @@ package podman
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -616,10 +619,112 @@ func TestBuildContainerArgs(t *testing.T) {
 			t.Error("Expected HTTPS_PROXY env var")
 		}
 
+		// Verify NO_PROXY is injected so local addresses bypass the proxy
+		if !strings.Contains(argsStr, "-e NO_PROXY=localhost,127.0.0.1,host.containers.internal") {
+			t.Errorf("Expected NO_PROXY env var in args: %s", argsStr)
+		}
+		if !strings.Contains(argsStr, "-e no_proxy=localhost,127.0.0.1,host.containers.internal") {
+			t.Errorf("Expected no_proxy env var in args: %s", argsStr)
+		}
+
 		// Verify CA cert volume mount
 		expectedMount := fmt.Sprintf("-v %s:/etc/ssl/certs/onecli-ca.pem:ro,Z", caFile)
 		if !strings.Contains(argsStr, expectedMount) {
 			t.Errorf("Expected CA cert mount %q in args: %s", expectedMount, argsStr)
+		}
+	})
+
+	t.Run("no_proxy not injected when onecli already sets it", func(t *testing.T) {
+		t.Parallel()
+
+		p := &podmanRuntime{}
+		sourcePath := t.TempDir()
+
+		params := runtime.CreateParams{
+			Name:       "test-workspace",
+			SourcePath: sourcePath,
+			Agent:      "test_agent",
+		}
+
+		ccArgs := &containerConfigArgs{
+			envVars: map[string]string{
+				"HTTP_PROXY": "http://proxy:8080",
+				"NO_PROXY":   "custom.internal",
+				"no_proxy":   "custom.internal",
+			},
+		}
+
+		args, err := p.buildContainerArgs(params, "kdn-test", ccArgs)
+		if err != nil {
+			t.Fatalf("buildContainerArgs() failed: %v", err)
+		}
+		argsStr := strings.Join(args, " ")
+
+		// OneCLI's NO_PROXY must be preserved as-is; we must not inject a second one.
+		if !strings.Contains(argsStr, "-e NO_PROXY=custom.internal") {
+			t.Errorf("Expected OneCLI NO_PROXY in args: %s", argsStr)
+		}
+		if strings.Contains(argsStr, "-e NO_PROXY=localhost") || strings.Contains(argsStr, "-e no_proxy=localhost") {
+			t.Errorf("Should not inject default NO_PROXY when OneCLI already provides it: %s", argsStr)
+		}
+	})
+
+	t.Run("no_proxy not injected when workspace config sets it", func(t *testing.T) {
+		t.Parallel()
+
+		p := &podmanRuntime{}
+		sourcePath := t.TempDir()
+		noProxyVal := "my-internal-host"
+
+		params := runtime.CreateParams{
+			Name:       "test-workspace",
+			SourcePath: sourcePath,
+			Agent:      "test_agent",
+			WorkspaceConfig: &workspace.WorkspaceConfiguration{
+				Environment: &[]workspace.EnvironmentVariable{
+					{Name: "NO_PROXY", Value: &noProxyVal},
+				},
+			},
+		}
+
+		ccArgs := &containerConfigArgs{
+			envVars: map[string]string{"HTTP_PROXY": "http://proxy:8080"},
+		}
+
+		args, err := p.buildContainerArgs(params, "kdn-test", ccArgs)
+		if err != nil {
+			t.Fatalf("buildContainerArgs() failed: %v", err)
+		}
+		argsStr := strings.Join(args, " ")
+
+		if !strings.Contains(argsStr, "-e NO_PROXY=my-internal-host") {
+			t.Errorf("Expected workspace NO_PROXY in args: %s", argsStr)
+		}
+		if strings.Contains(argsStr, "-e NO_PROXY=localhost") || strings.Contains(argsStr, "-e no_proxy=localhost") {
+			t.Errorf("Should not inject default NO_PROXY when workspace config already sets it: %s", argsStr)
+		}
+	})
+
+	t.Run("no_proxy not injected when ccArgs is nil", func(t *testing.T) {
+		t.Parallel()
+
+		p := &podmanRuntime{}
+		sourcePath := t.TempDir()
+
+		params := runtime.CreateParams{
+			Name:       "test-workspace",
+			SourcePath: sourcePath,
+			Agent:      "test_agent",
+		}
+
+		args, err := p.buildContainerArgs(params, "kdn-test", nil)
+		if err != nil {
+			t.Fatalf("buildContainerArgs() failed: %v", err)
+		}
+		argsStr := strings.Join(args, " ")
+
+		if strings.Contains(argsStr, "-e NO_PROXY=") || strings.Contains(argsStr, "-e no_proxy=") {
+			t.Errorf("Should not inject NO_PROXY when no OneCLI config: %s", argsStr)
 		}
 	})
 
@@ -831,6 +936,7 @@ func TestCreate_StepLogger_Success(t *testing.T) {
 
 	storageDir := t.TempDir()
 	sourcePath := t.TempDir()
+	onecliServer := newOnecliTestServer(t)
 
 	fakeExec := exec.NewFake()
 	fakeExec.RunFunc = func(ctx context.Context, args ...string) error {
@@ -841,10 +947,11 @@ func TestCreate_StepLogger_Success(t *testing.T) {
 	}
 
 	p := &podmanRuntime{
-		system:     &fakeSystem{},
-		executor:   fakeExec,
-		storageDir: storageDir,
-		config:     &fakeConfig{},
+		system:          &fakeSystem{},
+		executor:        fakeExec,
+		storageDir:      storageDir,
+		config:          &fakeConfig{},
+		onecliBaseURLFn: func(_ int) string { return onecliServer.URL },
 	}
 
 	fakeLogger := &fakeStepLogger{}
@@ -871,28 +978,19 @@ func TestCreate_StepLogger_Success(t *testing.T) {
 		t.Errorf("Expected no Fail() calls, got %d", len(fakeLogger.failCalls))
 	}
 
-	// Verify Start was called 5 times with correct messages
+	// Verify the full step sequence including OneCLI setup (always runs to inject proxy env vars)
 	expectedSteps := []stepCall{
-		{
-			inProgress: "Creating temporary build directory",
-			completed:  "Temporary build directory created",
-		},
-		{
-			inProgress: "Generating Containerfile",
-			completed:  "Containerfile generated",
-		},
-		{
-			inProgress: "Building container image: kdn-test-workspace",
-			completed:  "Container image built",
-		},
-		{
-			inProgress: "Creating onecli services",
-			completed:  "Onecli services created",
-		},
-		{
-			inProgress: "Creating workspace container: test-workspace",
-			completed:  "Workspace container created",
-		},
+		{inProgress: "Creating temporary build directory", completed: "Temporary build directory created"},
+		{inProgress: "Generating Containerfile", completed: "Containerfile generated"},
+		{inProgress: "Building container image: kdn-test-workspace", completed: "Container image built"},
+		{inProgress: "Creating onecli services", completed: "Onecli services created"},
+		{inProgress: "Starting postgres", completed: "Postgres started"},
+		{inProgress: "Waiting for postgres readiness", completed: "Postgres ready"},
+		{inProgress: "Starting OneCLI", completed: "OneCLI started"},
+		{inProgress: "Waiting for OneCLI readiness", completed: "OneCLI ready"},
+		{inProgress: "Retrieving OneCLI container config", completed: "Container config retrieved"},
+		{inProgress: "Stopping OneCLI services", completed: "OneCLI services stopped"},
+		{inProgress: "Creating workspace container: test-workspace", completed: "Workspace container created"},
 	}
 
 	if len(fakeLogger.startCalls) != len(expectedSteps) {
@@ -1103,6 +1201,7 @@ func TestCreate_StepLogger_FailOnCreateContainer(t *testing.T) {
 
 	storageDir := t.TempDir()
 	sourcePath := t.TempDir()
+	onecliServer := newOnecliTestServer(t)
 
 	fakeExec := exec.NewFake()
 	// Make Run succeed for build, but Output fail for create
@@ -1117,10 +1216,11 @@ func TestCreate_StepLogger_FailOnCreateContainer(t *testing.T) {
 	}
 
 	p := &podmanRuntime{
-		system:     &fakeSystem{},
-		executor:   fakeExec,
-		storageDir: storageDir,
-		config:     &fakeConfig{},
+		system:          &fakeSystem{},
+		executor:        fakeExec,
+		storageDir:      storageDir,
+		config:          &fakeConfig{},
+		onecliBaseURLFn: func(_ int) string { return onecliServer.URL },
 	}
 
 	fakeLogger := &fakeStepLogger{}
@@ -1142,17 +1242,23 @@ func TestCreate_StepLogger_FailOnCreateContainer(t *testing.T) {
 		t.Errorf("Expected Complete() to be called 1 time, got %d", fakeLogger.completeCalls)
 	}
 
-	// Verify Start was called 5 times (all steps through workspace container creation)
-	if len(fakeLogger.startCalls) != 5 {
-		t.Fatalf("Expected 5 Start() calls, got %d", len(fakeLogger.startCalls))
-	}
-
+	// OneCLI setup always runs; workspace container creation is the last step (which fails)
 	expectedSteps := []string{
 		"Creating temporary build directory",
 		"Generating Containerfile",
 		"Building container image: kdn-test-workspace",
 		"Creating onecli services",
+		"Starting postgres",
+		"Waiting for postgres readiness",
+		"Starting OneCLI",
+		"Waiting for OneCLI readiness",
+		"Retrieving OneCLI container config",
+		"Stopping OneCLI services",
 		"Creating workspace container: test-workspace",
+	}
+
+	if len(fakeLogger.startCalls) != len(expectedSteps) {
+		t.Fatalf("Expected %d Start() calls, got %d", len(expectedSteps), len(fakeLogger.startCalls))
 	}
 
 	for i, expected := range expectedSteps {
@@ -1246,6 +1352,7 @@ func TestCreate_StepLogger_Success_WithFeatures(t *testing.T) {
 
 	storageDir := t.TempDir()
 	sourcePath := t.TempDir()
+	onecliServer := newOnecliTestServer(t)
 
 	// Set up a minimal local feature.
 	configDir := t.TempDir()
@@ -1277,10 +1384,11 @@ func TestCreate_StepLogger_Success_WithFeatures(t *testing.T) {
 	}
 
 	p := &podmanRuntime{
-		system:     &fakeSystem{},
-		executor:   fakeExec,
-		storageDir: storageDir,
-		config:     &fakeConfig{},
+		system:          &fakeSystem{},
+		executor:        fakeExec,
+		storageDir:      storageDir,
+		config:          &fakeConfig{},
+		onecliBaseURLFn: func(_ int) string { return onecliServer.URL },
 	}
 
 	fakeLogger := &fakeStepLogger{}
@@ -1311,13 +1419,18 @@ func TestCreate_StepLogger_Success_WithFeatures(t *testing.T) {
 		t.Errorf("Expected no Fail() calls, got %d", len(fakeLogger.failCalls))
 	}
 
-	// Six steps: create dir, download features, containerfile, build, onecli services, workspace container.
 	expectedSteps := []stepCall{
 		{inProgress: "Creating temporary build directory", completed: "Temporary build directory created"},
 		{inProgress: "Downloading devcontainer features", completed: "Devcontainer features downloaded"},
 		{inProgress: "Generating Containerfile", completed: "Containerfile generated"},
 		{inProgress: "Building container image: kdn-test-workspace", completed: "Container image built"},
 		{inProgress: "Creating onecli services", completed: "Onecli services created"},
+		{inProgress: "Starting postgres", completed: "Postgres started"},
+		{inProgress: "Waiting for postgres readiness", completed: "Postgres ready"},
+		{inProgress: "Starting OneCLI", completed: "OneCLI started"},
+		{inProgress: "Waiting for OneCLI readiness", completed: "OneCLI ready"},
+		{inProgress: "Retrieving OneCLI container config", completed: "Container config retrieved"},
+		{inProgress: "Stopping OneCLI services", completed: "OneCLI services stopped"},
 		{inProgress: "Creating workspace container: test-workspace", completed: "Workspace container created"},
 	}
 
@@ -1343,6 +1456,7 @@ func TestCreate_CleansUpInstanceDirectory(t *testing.T) {
 
 		storageDir := t.TempDir()
 		sourcePath := t.TempDir()
+		onecliServer := newOnecliTestServer(t)
 
 		// Create a fake executor that simulates successful operations
 		fakeExec := &fakeExecutor{
@@ -1352,10 +1466,11 @@ func TestCreate_CleansUpInstanceDirectory(t *testing.T) {
 		}
 
 		p := &podmanRuntime{
-			system:     &fakeSystem{},
-			executor:   fakeExec,
-			storageDir: storageDir,
-			config:     &fakeConfig{},
+			system:          &fakeSystem{},
+			executor:        fakeExec,
+			storageDir:      storageDir,
+			config:          &fakeConfig{},
+			onecliBaseURLFn: func(_ int) string { return onecliServer.URL },
 		}
 
 		params := runtime.CreateParams{
@@ -1421,6 +1536,32 @@ func TestCreate_CleansUpInstanceDirectory(t *testing.T) {
 }
 
 // fakeExecutor is a test double for the exec.Executor interface
+// newOnecliTestServer starts an httptest server that handles the OneCLI endpoints
+// invoked during Create() (health, api-key, container-config). Use together with
+// podmanRuntime.onecliBaseURLFn to avoid dialling a real localhost port in tests.
+func newOnecliTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/health":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/user/api-key":
+			_ = json.NewEncoder(w).Encode(map[string]string{"apiKey": "oc_testkey"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/container-config":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"env":                        map[string]string{},
+				"caCertificate":              "",
+				"caCertificateContainerPath": "",
+			})
+		default:
+			t.Errorf("unexpected OneCLI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 type fakeExecutor struct {
 	runErr    error
 	outputErr error
